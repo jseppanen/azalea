@@ -1,0 +1,49 @@
+
+### hyperparameters ###
+
+replaybuf_size: 100000  # per worker
+replaybuf_resample: 10
+
+lr_initial: 1.0e-1
+lr_decay_steps: 50000
+lr_decay: 0.3
+momentum: 0.9
+l2_regularization: 1.e-4
+
+total_steps: 5000000
+
+# 32 (*64) on alphago, 64 (*64) on alphazero
+batch_size: 128
+
+# c_PUCT
+exploration_coef: 0.5
+
+# tau
+exploration_temperature: 1.0
+
+exploration_depth: 15
+exploration_noise_alpha: 0.03
+exploration_noise_scale: 0.25
+
+# network architecture
+num_blocks: 6
+base_chans: 64
+
+# 1600 in alphago, 800 in alphazero
+simulations: 800
+
+# MCTS simulation and evaluation batching
+search_batch_size: 10
+
+### runtime configuration (no hyperparameters) ###
+
+log_interval: 500
+model_checkpoint_interval: 10000      # 4MB/30mins
+replaybuf_checkpoint_interval: 50000  # 160MB/150mins
+
+seed: 0xBAD5EED5
+device: 'auto'
+
+game: 'hex'
+network: 'HexNetwork'
+board_size: 11

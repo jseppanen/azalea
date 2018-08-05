@@ -1,0 +1,14 @@
+
+game: 'hex'
+board_size: 11
+seed: 0xBAD5EED5
+device: 'auto'
+
+# evaluation parameters
+
+eval_rounds: 10
+
+eval_models:
+  - s3://<bucket>/runs/train/checkpoints/checkpoint.100000.policy.pth
+  - s3://<bucket>/runs/train/checkpoints/checkpoint.200000.policy.pth
+  - s3://<bucket>/runs/train/checkpoints/checkpoint.300000.policy.pth
