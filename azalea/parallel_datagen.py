@@ -58,8 +58,8 @@ def parallel_play(policy_state, config, seed):
     torch.cuda.manual_seed(seed)
     if policy_state:
         policy = Policy(config)
-        policy.net.eval()
         policy.load_state_dict(policy_state)
+        policy.net.eval()
     else:
         policy = RandomPolicy(config)
     return play_game_startpos(config, policy)
