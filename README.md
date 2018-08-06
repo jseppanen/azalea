@@ -22,6 +22,8 @@ learning algorithm for the [Hex board game](https://en.wikipedia.org/wiki/Hex_(b
 
 * Single GPU implementation only - tested on Nvidia V100, with 8 CPU's
   for move generation and MCTS, and 1 GPU for the policy network.
+* Pre-trained model has smaller capacity: resnet having 6 blocks of 64
+  channels instead of 19 (or 39) blocks of 256 channels
 * Only Hex game is implemented, though the code supports adding more
   games. Two components are needed for a new game: move generator and
   policy network, with board input and moves output adjusted to the
