@@ -6,6 +6,19 @@
 Azalea is a reinterpretation of the [AlphaZero game AI](https://en.wikipedia.org/wiki/AlphaZero)
 learning algorithm for the [Hex board game](https://en.wikipedia.org/wiki/Hex_(board_game)).
 
+## Quick start
+
+1. Install (requires Python 3.6, virtualenv recommended):
+```
+pip install azalea
+```
+2. Download the pre-trained model [hex11-20180712-3362.policy.pth](https://raw.githubusercontent.com/jseppanen/azalea/master/models/hex11-20180712-3362.policy.pth)
+3. Play against the pre-trained model:
+```
+azalea-play hex11-20180712-3362.policy.pth
+```
+You can use the `--first` option if you wish to play first.
+
 ## Features
 
 * Straightforward reimplementation of the AlphaZero algorithm except
