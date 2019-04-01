@@ -11,7 +11,7 @@ with open("README.md", "r") as fh:
 setup(
     name='azalea',
     version='0.1.0',
-    license='BSD 3-Clause License',
+    license='GPL-3.0-only',
     description='Hex board game AI with self-play learning based on the AlphaZero algorithm',
     long_description=long_description,
     long_description_content_type='text/markdown',
@@ -38,7 +38,7 @@ setup(
     },
     classifiers=(
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: BSD License",
+        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
         "Operating System :: POSIX :: Linux",
         "Operating System :: OS Independent",
     ),
