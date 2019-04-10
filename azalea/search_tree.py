@@ -1,359 +1,399 @@
 
+from contextlib import contextmanager
+from dataclasses import dataclass, astuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
+
 import numpy as np
 import torch
-from numba import jit, njit, jitclass
-from numba import int32, float32, uint32
+from numpy import int32, float32
+from numpy.random import RandomState
 
-from .search import get_game_states, normalize_position
 from .fnv1a import fnv1a
+from .network import Network
+from .typing import SearchableEnv, GameState
 
-MAX_NODES = 350000    # 300 moves x 1000 evaluations
-MAX_EDGES = 10000000  # 30 legal moves per turn
+DEBUG = False
+
+# 300 moves/game x 1000 evaluations/move x 30 next moves/eval
+MAX_NODES = 10000000
 
 
-class SearchTreeFull(BaseException):
+class SearchTreeFull(Exception):
     pass
 
 
-search_tree_spec = [
-    ('num_nodes', int32),
-    ('num_edges', int32),
-    ('first_child', int32[:]),
-    ('num_children', int32[:]),
-    ('moves_checksum', uint32[:]),
-    ('children', int32[:]),
-    ('num_visits', float32[:]),
-    ('total_value', float32[:]),
-    ('prior_prob', float32[:]),
-]
+class SearchTree:
+    """
+    SearchTree stores the explored game tree and its MCTS statistics.
+    Tree nodes are board positions and edges are moves of the game.
+    Terminal leaf nodes have
 
+        `num_children[node_id] = 0`.
 
-@jitclass(search_tree_spec)
-class SearchTreeData(object):
+    Unevaluated leaf nodes have
+
+        `num_children[node_id] = -1`.
+
+    * total_value is stored from current node's active player's perspective
+      (opponent of parent node's player)
+    * prior_prob is stored from parent node's player's perspective
+      (opponent of current node's player)
+    """
+
     def __init__(self):
         self.num_nodes = 0
-        self.num_edges = 0
-        self.first_child = np.zeros(MAX_NODES, dtype=np.int32)
-        self.num_children = np.zeros(MAX_NODES, dtype=np.int32)
-        self.moves_checksum = np.zeros(MAX_NODES, dtype=np.uint32)
-        self.children = np.zeros(MAX_EDGES, dtype=np.int32)
-        self.num_visits = np.zeros(MAX_EDGES, dtype=np.float32)
-        self.total_value = np.zeros(MAX_EDGES, dtype=np.float32)
-        self.prior_prob = np.zeros(MAX_EDGES, dtype=np.float32)
+        self.root_id: int32 = 0
 
+        # tree edges
+        self.parent = -np.ones(MAX_NODES, dtype=int32)
+        self.first_child = -np.ones(MAX_NODES, dtype=int32)
+        self.num_children = -np.ones(MAX_NODES, dtype=int32)
 
-@jit
-def reset(tree, net, device, board, moves):
-    """Reset search tree at the start of a new game"""
-    junk, num_children, prior_prob = evaluate(
-        tree,
-        net,
-        device,
-        np.expand_dims(board, 0),
-        np.expand_dims(moves, 0),
-        np.zeros(1, dtype=np.int32))
-    expand(
-        tree,
-        np.zeros(1, dtype=np.int32),
-        num_children,
-        prior_prob,
-        np.array([fnv1a(moves)], dtype=np.uint32))
+        # MCTS statistics
+        self.num_visits = -np.ones(MAX_NODES, dtype=float32)
+        self.total_value = -np.ones(MAX_NODES, dtype=float32)
+        self.prior_prob = -np.ones(MAX_NODES, dtype=float32)
 
+        self.reset()
 
-@njit
-def select(tree, root_id, batch_size, exploration_coef,
-           noise_scale, noise_alpha):
-    """Select batch of leaf edges for expansion
-    :param root_id: search start position
-    :param batch_size: how many positions to select
-    :param exploration_coef: exploration coefficient c_puct
-    :param noise_scale: Dirichlet exploration noise scale
-    :param noise_alpha: Dirichlet exploration noise concentration
-    """
-    assert root_id >= 0 and root_id < tree.num_nodes, 'invalid root node'
-    assert tree.num_children[root_id], 'terminal node'
-    path_child_ids = []  # index of each traversed edge/child
-    path_checksums = []  # checksum of moves of each traversed edge
-    path_lens = []
-    path_leafs = []  # leaf edges sampled
-    for i in range(batch_size):
-        node_id = root_id
-        edge_id = -1
-        path_len = 0
-        root = True
-        while (root or node_id) and tree.num_children[node_id]:
-            e = tree.first_child[node_id]
-            f = e + tree.num_children[node_id]
-            t = np.sqrt(np.sum(tree.num_visits[e:f])) \
-                / (1. + tree.num_visits[e:f])
-            p = tree.prior_prob[e:f]
-            if root and noise_scale:
-                # explore random actions at root node
-                # numba doesn't support np.random.dirichlet
-                noise = np.random.gamma(noise_alpha, 1.0, len(p)) \
-                    .astype(np.float32)
-                noise = noise / np.sum(noise)
-                p = np.float32(1. - noise_scale) * p \
-                    + np.float32(noise_scale) * noise
-            u = exploration_coef * p * t
-            q = tree.total_value[e:f] / np.maximum(1., tree.num_visits[e:f])
-            s = q + u
-            child_id = np.argmax(s)
-            edge_id = e + child_id
-            # virtual loss: assume selected path leads to loss
-            # assumption is reverted in backup(.)
-            tree.num_visits[edge_id] += 1
-            tree.total_value[edge_id] -= 1
-            path_child_ids.append(child_id)
-            path_checksums.append(tree.moves_checksum[node_id])
-            node_id = tree.children[edge_id]
-            path_len += 1
-            root = False
-        # sampled new path
-        assert path_len, 'no path found'
-        assert edge_id != -1, 'no leaf found'
-        path_lens.append(path_len)
-        path_leafs.append(edge_id)
-        #print('select', i, 'root', root_id, 'leaf', edge_id, 'path', *path_child_ids[-path_len:])
-    path_child_ids2 = np.array(path_child_ids, dtype=np.int32)
-    path_checksums2 = np.array(path_checksums, dtype=np.uint32)
-    path_lens2 = np.array(path_lens, dtype=np.int32)
-    path_leafs2 = np.array(path_leafs, dtype=np.int32)
-    return path_child_ids2, path_lens2, path_leafs2, path_checksums2
-
-
-@jit
-def evaluate(tree, net, device, boards, moves, results):
-    """Evaluate batch of new child nodes
-    Boards, moves, and results always from same player orientation
-    """
-    # evaluate batch
-    value = np.zeros(results.shape, dtype=np.float32)
-    prior_prob = np.zeros(moves.shape, dtype=np.float32)
-    if any(results == 0):
-        batch = {
-            'board': torch.tensor(boards[results == 0]),
-            'moves': torch.tensor(moves[results == 0], dtype=torch.int64)
-        }
-        if device.type == 'cuda':
-            batch['board'] = batch['board'].pin_memory().to(device)
-            batch['moves'] = batch['moves'].pin_memory().to(device)
-        # numba doesn't like torch.no_grad() context manager
-        prev_grad_enable = torch.is_grad_enabled()
-        torch.set_grad_enabled(False)
-        output = net.run(batch)
-        torch.set_grad_enabled(prev_grad_enable)
-        value[results == 0] = output['value'].cpu().numpy()
-        prior_prob[results == 0] = np.exp(output['moves_logprob']
-                                          .cpu().numpy())
-    value[results != 0] = results[results != 0] - 2.
-    num_children = (moves > 0).sum(1)
-    return value, num_children, prior_prob
-
-
-@njit
-def expand(tree, path_leafs, num_children, prior_prob, moves_checksum):
-    """Create nodes for batch of new child nodes"""
-    # expand tree
-    for i in range(len(path_leafs)):
-        edge = path_leafs[i]
-        n = num_children[i]
-        # unpad prior_prob
-        tree.children[edge] = add_node(tree, n, prior_prob[i, :n],
-                                       moves_checksum[i])
-
-
-@njit
-def backup(tree, root_id, path_child_ids, path_lens, values):
-    """Update tree with batch of evaluation results"""
-    assert root_id >= 0 and root_id < tree.num_nodes, 'invalid root node'
-    assert tree.num_children[root_id], 'terminal node'
-    p = 0
-    for i in range(len(path_lens)):
-        pl = path_lens[i]
-        v = values[i]
-        # value from root's perspective
-        v *= 1 - 2 * (pl % 2)
-        node_id = root_id
-        for j in range(p, p + pl):
-            child_id = path_child_ids[j]
-            edge_id = tree.first_child[node_id] + child_id
-            # num_visits already incremented at select (virtual loss)
-            tree.total_value[edge_id] += (1 + v)
-            node_id = tree.children[edge_id]
-            v = -v
-        assert v == values[i], 'backup: wrong value'
-        p += pl
-    assert p == len(path_child_ids), 'backup: wrong path length'
-
-
-@njit
-def add_node(tree, num_children, prior_prob, moves_checksum):
-    """
-    :returns: New node id
-    """
-    node_id = tree.num_nodes
-    first_child = tree.num_edges
-    end_child = first_child + num_children
-    if tree.num_nodes == MAX_NODES:
-        raise SearchTreeFull('too many nodes')
-    if tree.num_edges == MAX_EDGES:
-        raise SearchTreeFull('too many edges')
-    tree.num_nodes += 1
-    assert tree.num_nodes <= MAX_NODES, 'tree nodes buffer overflow'
-    tree.num_edges += num_children
-    assert tree.num_edges <= MAX_EDGES, 'tree edges buffer overflow'
-    tree.first_child[node_id] = first_child
-    tree.num_children[node_id] = num_children
-    tree.moves_checksum[node_id] = moves_checksum
-    tree.children[first_child:end_child] = 0
-    tree.num_visits[first_child:end_child] = 0
-    tree.total_value[first_child:end_child] = 0
-    tree.prior_prob[first_child:end_child] = prior_prob
-    #print('add node:', node_id, num_children, hex(moves_checksum))
-    return node_id
-
-
-@jit
-def sample_paths(tree, node_id, utils, game, net, device,
-                 num_simulations, batch_size, exploration_coef,
-                 exploration_noise_scale, exploration_noise_alpha):
-    """Sample paths and update tree statistics in place.
-    """
-    num_batches = num_simulations // batch_size + 1
-    search_depth = 0
-    search_value = 0
-    for i in range(num_batches):
-        #print('sample paths: batch %d' % i)
-        child_ids, lens, leafs, leaf_checksums = select(
-            tree, node_id, batch_size, exploration_coef,
-            exploration_noise_scale, exploration_noise_alpha)
-        boards, results, moves, checksums = get_game_states(
-            utils, game, child_ids, lens, leaf_checksums)
-        values, num_children, prior_prob = evaluate(
-            tree, net, device, boards, moves, results)
-        expand(tree, leafs, num_children, prior_prob, checksums)
-        backup(tree, node_id, child_ids, lens, values)
-        search_depth += np.sum(lens)
-        search_value += np.sum(values)
-    metrics = {
-        'search_depth': search_depth / (num_batches * batch_size),
-        'search_value': search_value / (num_batches * batch_size)
-    }
-    return metrics
-
-
-class SearchTree(object):
-    def __init__(self, utils, net, device,
-                 num_simulations, batch_size, exploration_coef,
-                 exploration_noise_alpha):
-        """Initialize parallel search tree from starting position.
-        :param exploration_coef: Exploration coefficient c_puct
-        :param exploration_noise_alpha: Exploration noise concentration
+    def reset(self):
+        """Clear tree.
         """
-        self.tree = SearchTreeData()
-        self.utils = utils
-        self.net = net
-        self.device = device
-        self.num_simulations = num_simulations
-        self.batch_size = batch_size
-        self.exploration_coef = exploration_coef
-        self.exploration_noise_alpha = exploration_noise_alpha
+        self.num_nodes = 1
+        self.root_id = 0
 
-    def reset(self, game):
-        """Start new game.
-        :param game: Initial game state
+        # create unevaluated root node
+        self.parent[0] = -1
+        self.first_child[0] = -1
+        self.num_children[0] = -1
+        self.num_visits[0] = 0
+        self.total_value[0] = 0
+        self.prior_prob[0] = 1.0
+
+    def search(self, game: SearchableEnv, network: Network, *,
+               num_simulations: int = 100,
+               temperature: float = 1.0,
+               exploration_coef: float = 1.0,
+               exploration_noise_scale: float = 1.0,
+               exploration_noise_alpha: float = 1.0,
+               batch_size: int = 10,
+               rng: Optional[RandomState] = None) \
+            -> Tuple[np.ndarray, float, Dict[str, Any]]:
+        """Plan for next moves with Monte Carlo tree search (AZ flavor).
+        The search is deterministic by default, but you can provide seeded
+        random number generators for stochastic results.
+        :param temperature: Exploration temperature
+        :param exporation_noise_scale: Exploration noise scale
+        :param rng: Random number generator (by default seeded with 0)
+        :return: Next move probabilities, game value, and debug metrics
         """
-        board = game.board()
-        moves = game.legal_moves()
-        assert not game.result(), 'game is terminal'
-        assert not game.color(), 'expecting white turn'
-        self.tree = SearchTreeData()
-        reset(self.tree, self.net, self.device, board.ravel(), moves)
+        # avoid circular dependency
+        from . import mcts
+
+        if rng is None:
+            rng = RandomState(0)
+
+        with torch.no_grad():
+            network.eval()
+            metrics = mcts.sample_paths(
+                self, game, network,
+                num_simulations, batch_size,
+                exploration_coef,
+                exploration_noise_scale,
+                exploration_noise_alpha,
+                rng)
+        # play
+        stats = self.root.move_stats
+        move_probs = as_distribution(stats.num_visits, temperature)
+        value = self.root.total_value / self.root.num_visits
+        metrics['search_root_width'] = np.sum(stats.num_visits > 0)
+        metrics['search_root_visits'] = np.mean(stats.num_visits)
+        metrics['search_root_children'] = len(stats.num_visits)
+        metrics['search_tree_nodes'] = self.num_nodes
+        return move_probs, value, metrics
+
+    def move(self, move_id: int) -> None:
+        """Commit move and pick new root node.
+        Set new tree root to one of current root's child nodes.
+        Forget about ancestor and sibling nodes.
+        :param move_id: Action id of move that was made
+        """
+        if not self.root.is_evaluated():
+            # step to the unknown, nothing to remember
+            self.reset()
+            return
+
+        assert self.root_id < self.num_nodes, 'root node is unevaluated'
+        node = self.root.child(move_id)
+        if not node.is_evaluated():
+            # step to the unknown, nothing to remember
+            self.reset()
+        else:
+            self.root_id = node.id
 
     @property
-    def root(self):
-        """Get tree root.
-        :returns: Root node id
+    def root(self) -> 'SearchNode':
+        """Access root node.
         """
-        assert self.tree.num_nodes > 0, 'tree not initialized'
-        return 0
+        return SearchNode(self, self.root_id)
 
-    def get_child(self, node_id, child_id, moves):
-        """Get node child.
-        :returns: Child node id or 0 if leaf node
+    @contextmanager
+    def search_forward(self, game: SearchableEnv) \
+            -> Generator['ForwardSearchIterator', None, None]:
+        """Snapshot game state and start search.
+        :returns: Iterator for root node
         """
-        assert node_id < self.tree.num_nodes, 'illegal node'
-        # check moves are same as during search
-        assert self.tree.moves_checksum[node_id] == fnv1a(moves), 'checksum error'
-        return self.tree.children[self.tree.first_child[node_id] + child_id]
+        assert self.root_id >= 0 and self.root_id < self.num_nodes, \
+            'invalid root node'
+        assert self.root.is_evaluated(), 'unevaluated root'
+        assert not self.root.is_terminal(), 'terminal root'
+        game.snapshot()
+        try:
+            yield ForwardSearchIterator(self.root, game)
+        finally:
+            game.restore()
 
-    def search(self, game, node_id, temperature, noise_scale):
-        """Search for next moves.
-        :param game: Current game state
-        :param node_id: Node representing current game state
-        :param temperature: Exploration temperature
-        :param noise_scale: Exploration noise scale
-        :return: Next move probabilities
+
+class SearchNode:
+    """Search tree node, incl. MCTS statistics."""
+
+    def __init__(self, tree: SearchTree, node_id: int) -> None:
+        assert node_id >= 0, 'illegal node'
+        assert node_id < tree.num_nodes, 'illegal node'
+        self.tree = tree
+        self._id = node_id
+
+    def __eq__(self, other: 'SearchNode') -> bool:
+        return self.id == other.id
+
+    @property
+    def id(self) -> int32:
+        """Node id (read only).
         """
-        metrics = sample_paths(self.tree, node_id,
-                               self.utils, game, self.net, self.device,
-                               self.num_simulations, self.batch_size,
-                               self.exploration_coef,
-                               noise_scale,
-                               self.exploration_noise_alpha)
-        # play
-        e = self.tree.first_child[node_id]
-        f = e + self.tree.num_children[node_id]
-        v = self.tree.num_visits[e:f]
-        log_pi = np.log(v.clip(min=1))
-        log_pi[v == 0] = -999
-        if temperature:
-            log_pi = log_pi / temperature
-        else:
-            log_pi[log_pi < log_pi.max()] = -999
-        # avoid numerical issues
-        log_pi = log_pi.astype(np.float64)
-        log_z = np.logaddexp.reduce(log_pi)
-        pi = np.exp(log_pi - log_z)
-        metrics['search_root_width'] = np.sum(v > 0)
-        metrics['search_root_visits'] = np.mean(v)
-        metrics['search_root_children'] = len(v)
-        return pi, metrics
+        return self._id
 
-    def move(self, game, node_id, action, moves):
-        """Make move without searching.
-        :param game: Game state **after** move has been made
-        :param action: Action id of move that was made
-        :param moves: Legal moves **before** move was made
+    @property
+    def parent(self) -> 'SearchNode':
+        """Get parent node in search tree.
         """
-        child = self.get_child(node_id, action, moves)
-        if child:
-            return child
-        board_after, moves_after, result_after = \
-            normalize_position(self.utils, game)
-        checksum = fnv1a(game.legal_moves())
-        value, num_children, prior_prob = evaluate(
-            self.tree,
-            self.net,
-            self.device,
-            np.expand_dims(board_after.ravel(), 0),
-            np.expand_dims(moves_after, 0),
-            np.array([result_after], dtype=np.int32))
-        edge_id = self.tree.first_child[node_id] + action
-        expand(
-            self.tree,
-            np.array([edge_id], dtype=np.int32),
-            num_children,
-            prior_prob,
-            np.array([checksum], dtype=np.uint32))
-        # no need to backup because node will be new root
-        child = self.tree.children[edge_id]
-        assert child, 'wrong node'
-        return child
+        assert not self.is_root(), 'root has no parent'
+        return SearchNode(self.tree, self.tree.parent[self.id])
 
-    def stats(self):
-        return {
-            'search_tree_nodes': self.tree.num_nodes,
-            'search_tree_edges': self.tree.num_edges
-        }
+    def child(self, move_id: int32) -> 'SearchNode':
+        """Get N'th child node.
+        :param move_id: Index of child node
+        """
+        assert self.is_evaluated(), 'unevaluated node'
+        assert move_id >= 0, 'illegal child'
+        assert move_id < self.num_children, 'illegal child'
+        node_id = self.tree.first_child[self.id] + move_id
+        return SearchNode(self.tree, node_id)
+
+    @property
+    def move_stats(self) -> 'SearchStats':
+        """Get vectorized MCTS statistics for all moves from this node.
+        :returns: MCTS stats for moves from current player's perspective
+        """
+        assert self.is_evaluated(), 'unevaluated nodes have no stats'
+        first_child = self.tree.first_child[self.id]
+        node_ids = slice(first_child, first_child + self.num_children)
+        # priors are already stored from parent's perspective, but
+        # values are from child nodes' own perspective, so need to be negated
+        return SearchStats(self.tree.num_visits[node_ids],
+                           -self.tree.total_value[node_ids],
+                           self.tree.prior_prob[node_ids])
+
+    @property
+    def num_children(self) -> int32:
+        return self.tree.num_children[self.id]
+
+    @property
+    def num_visits(self) -> float32:
+        return self.tree.num_visits[self.id]
+
+    @num_visits.setter
+    def num_visits(self, visits: float32) -> None:
+        self.tree.num_visits[self.id] = visits
+    
+    @property
+    def total_value(self) -> float32:
+        return self.tree.total_value[self.id]
+
+    @total_value.setter
+    def total_value(self, value: float32) -> None:
+        self.tree.total_value[self.id] = value
+    
+    @property
+    def prior_prob(self):
+        return self.tree.prior_prob[self.id]
+
+    def is_evaluated(self) -> bool:
+        """Test for evaluated nodes.
+        Unevaluated nodes are leaves, whose children and MCTS stats
+        are undefined.
+        """
+        return self.num_children >= 0
+
+    def is_terminal(self) -> bool:
+        """Test for terminal nodes.
+        Terminal nodes are leaves which have been evaluated and
+        have no children.
+        """
+        return self.num_children == 0
+
+    def is_root(self) -> bool:
+        """Test for root node.
+        """
+        return self == self.tree.root
+
+    def is_leaf(self) -> bool:
+        """Test for leaf nodes.
+        """
+        return (not self.is_evaluated()) or self.is_terminal()
+
+    def create_child_nodes(self, num_children: int,
+                           prior_prob: np.ndarray) -> None:
+        """Create new child nodes and initialize MCTS statistics.
+        """
+        if self.tree.num_nodes + num_children > MAX_NODES:
+            raise SearchTreeFull('too many nodes')
+
+        first_node_id = self.tree.num_nodes
+        self.tree.num_nodes += num_children
+        assert self.tree.num_nodes <= MAX_NODES, 'tree nodes buffer overflow'
+
+        self.tree.first_child[self.id] = first_node_id
+        self.tree.num_children[self.id] = num_children
+
+        node_ids = slice(first_node_id, first_node_id + num_children)
+        self.tree.parent[node_ids] = self.id
+        self.tree.first_child[node_ids] = -1
+        self.tree.num_children[node_ids] = -1  # mark as unevaluated
+        self.tree.num_visits[node_ids] = 0
+        self.tree.total_value[node_ids] = 0
+        self.tree.prior_prob[node_ids] = prior_prob
+
+
+@dataclass
+class SearchStats:
+    num_visits: np.ndarray  # dim=1, dtype=float32
+    total_value: np.ndarray  # dim=1, dtype=float32
+    prior_prob: np.ndarray  # dim=1, dtype=float32
+
+
+class ForwardSearchIterator:
+    """Combined game state and tree node when searching forward in game.
+    Search forward in the game and track search tree node while searching.
+    """
+
+    def __init__(self, node: SearchNode, game: SearchableEnv) -> None:
+        self._game = game
+        self._node = node
+        if DEBUG:
+            print(f'search: node {self._node.id} '
+                  f'nch {self._node.num_children} '
+                  f'game {hash(str(astuple(self._game.state)))} '
+                  f'nmv {len(self._game.state.legal_moves)}')
+
+    def step(self, move_id: int) -> None:
+        """Move one step forward in game and tree.
+        :param move_id: Ordinal move id among legal moves in current node
+        """
+        state = self._game.state
+        assert move_id < len(state.legal_moves), \
+            f"move id {move_id} out of range"
+        assert not state.result, 'game ended in select'
+        move = state.legal_moves[move_id]
+        self._game.step(move)
+        self._node = self._node.child(move_id)
+        if DEBUG:
+            print(f'step {move}: node {self._node.id} '
+                  f'nch {self._node.num_children} '
+                  f'game {hash(str(astuple(self._game.state)))} '
+                  f'nmv {len(self._game.state.legal_moves)}')
+            #self._game.io.print_state(self._game.state)
+
+    @property
+    def state(self) -> GameState:
+        """Retrieve game state for current search position."""
+        return self._game.state
+
+    @property
+    def node(self) -> SearchNode:
+        """Retrieve tree node for current search position."""
+        return self._node
+
+
+def as_distribution(counts: np.ndarray, temperature: float = 1.0) \
+        -> np.ndarray:
+    """Normalize count vector as a multinomial distribution.
+    Apply temperature change if requested.
+    :returns: Multinomial probability distribution
+    """
+    assert all(counts >= 0)
+    log_pi = np.log(counts.clip(min=1))
+    log_pi[counts == 0] = -np.inf
+    if temperature:
+        log_pi = log_pi / temperature
+    else:
+        log_pi[log_pi < log_pi.max()] = -np.inf
+    # avoid numerical issues
+    log_pi = log_pi.astype(np.float64)
+    log_z = np.logaddexp.reduce(log_pi)
+    pi = np.exp(log_pi - log_z)
+    return pi
+
+
+def print_tree(tree: SearchTree) -> None:
+    """Pretty print search tree.
+    0
+    ├── 5 [0] move 393240 value -0.00/3 (0.43)
+    │   ├── [22] move 458757 value 0.00/0 (1.00)
+    │   └── [34] move 196636 value 0.00/0 (0.00)
+    ├── 3 [1] move 393241 value 0.51/2 (0.00)
+    │   ├── 7 [10] move 262149 value 0.69/1 (0.61)
+    │   │   ├── [39] move 327682 value 0.00/0 (0.00)
+    """
+    for line in format_tree_lines(tree):
+        print(line)
+
+
+def format_tree_lines(tree: SearchTree) -> Generator[str, None, None]:
+    yield format_node(tree.root)
+    for line in format_subtree_lines(tree, tree.root, 1, []):
+        yield line
+
+
+def format_subtree_lines(tree: SearchTree, node: SearchNode, indent: int,
+                         last: List[bool]) -> Generator[str, None, None]:
+    indent += 1
+    for i in range(node.num_children):
+        child = node.child(i)
+        last.append(i == node.num_children - 1)
+        prefix = format_tree_prefix(last)
+        suffix = format_node(child, move_id=i)
+        yield prefix + suffix
+        if not child.is_leaf():
+            for line in format_subtree_lines(tree, child, indent, last):
+                yield line
+        last.pop()
+
+
+def format_tree_prefix(last: List[bool]) -> str:
+    if not last:
+        return ''
+
+    prefix = ''.join('    ' if x else '│   ' for x in last[:-1])
+    prefix += '└── ' if last[-1] else '├── '
+    return prefix
+
+
+def format_node(node: SearchNode, move_id: Optional[int] = None) -> str:
+    num_visits = node.num_visits
+    value = node.total_value / max(1, num_visits)
+    prior = node.prior_prob
+    txt = f'{node.id} '
+    if move_id is not None:
+        txt += f'[{move_id}] '
+    txt += f'value {value:.2f} vis {num_visits:.0f} (pri {prior:.2f})'
+    return txt

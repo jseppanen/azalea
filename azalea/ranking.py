@@ -39,7 +39,7 @@ def lossgrad(scores, outcomes):
     return l, g
 
 
-class RankingError(BaseException):
+class RankingError(Exception):
     pass
 
 

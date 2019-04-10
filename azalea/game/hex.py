@@ -1,22 +1,148 @@
 
-import sys
-from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import numpy as np
 from numba import njit, jitclass, int32
 
-from .term import gray, blue, red, Color, termcolor
+from . import hex_io
 
 
-game_state_spec = [
+@dataclass
+class HexGameState:
+    color: int  # 0=first player (red), 1=second player (blue)
+    legal_moves: np.ndarray
+    result: int
+    board: np.ndarray
+
+
+class HexGame:
+    """Game of Hex
+    See https://en.wikipedia.org/wiki/Hex_(board_game)
+    """
+
+    # printing boards etc.
+    io = hex_io
+
+    def __init__(self, board_size: int = 11) -> None:
+        self.board_size = board_size
+        self.impl = HexGameImpl(self.board_size)
+        self._game_snapshot = None
+        self.reset()
+
+    def __getstate__(self):
+        """Pickling support"""
+        return (self.impl.board.copy(),
+                self.impl.color,
+                self.impl.winner)
+
+    def __setstate__(self, state):
+        """Pickling support"""
+        board, color, winner = state
+        self.__init__(board.shape[0])
+        self.impl.board[:] = board
+        self.impl.color = color
+        self.impl.winner = winner
+
+    def reset(self):
+        self.impl = HexGameImpl(self.board_size)
+        self._game_snapshot = None
+
+    def seed(self, seed: Optional[int] = None) -> None:
+        """Seed random number generator."""
+        pass
+
+    @property
+    def state(self) -> HexGameState:
+        return HexGameState(self.impl.color - 1,
+                            self.impl.legal_moves(),
+                            self.impl.result(),
+                            self.impl.board.copy())
+
+    def step(self, move: int) -> None:
+        self.impl.step(move)
+
+    def snapshot(self) -> None:
+        self._game_snapshot = self.__getstate__()
+
+    def restore(self) -> None:
+        assert self._game_snapshot
+        self.__setstate__(self._game_snapshot)
+
+    @staticmethod
+    def flip_player_board(board: np.ndarray) -> np.ndarray:
+        """Flip board to opponent perspective.
+        Change both color and attack direction.
+        :param board: One game board (M x M) or batch of boards (B x M x M)
+        """
+        assert isinstance(board, np.ndarray)
+        if len(board.shape) == 2:
+            return HexGame.flip_player_board(board[None, :, :])
+        assert len(board.shape) == 3, 'expecting batch of boards'
+        assert board.shape[-2] == board.shape[-1], 'board must be square'
+        # flip color
+        board = (board > 0) * (3 - board)
+        # flip attack direction: mirror board along diagonal
+        board = np.flip(np.rot90(board, axes=(-2, -1)), axis=-1)
+        return board
+
+    @staticmethod
+    def flip_player_board_moves(board: np.ndarray, moves: np.ndarray) \
+            -> Tuple[np.ndarray, np.ndarray]:
+        """Flip board and legal moves to opponent perspective.
+        Change both color and attack direction.
+        :param board: One game board (M x M) or batch of boards (B x M x M)
+        :param moves: Legal moves (K) or padded batch of moves (B x K)
+        """
+        assert isinstance(board, np.ndarray)
+        assert isinstance(moves, np.ndarray)
+        if len(board.shape) == 2:
+            assert len(moves.shape) == 1, 'expecting 1D moves array'
+            return HexGame.flip_player_board_moves(board[None, :, :],
+                                                   moves[None, :])
+        board = HexGame.flip_player_board(board)
+        assert isinstance(moves, np.ndarray)
+        assert len(moves.shape) == 2, 'expecting batch of moves'
+        assert len(moves) == len(board), 'board and moves batch sizes differ'
+        board_size = board.shape[-2:]
+        # remove padding and collapse ragged rows
+        moves_size = moves.shape
+        flat_moves = moves.ravel().copy()
+        mask = (flat_moves > 0)
+        tiles = flat_moves[mask] - 1
+        # calculate new move coordinates mirrored along diagonal
+        tile_ids = np.unravel_index(tiles, board_size)
+        tiles = np.ravel_multi_index(
+            (board_size[1] - 1 - tile_ids[1], board_size[0] - 1 - tile_ids[0]),
+            board_size)
+        # restore padded moves batch
+        flipped_moves = np.zeros_like(moves).ravel()
+        flipped_moves[mask] = tiles.astype(np.int32) + 1
+        flipped_moves = flipped_moves.reshape(moves_size)
+        return board, flipped_moves
+
+    @staticmethod
+    def random_reflect(board, moves=None, rng=None):
+        """Rotate/flip board at random while keeping same player perspective.
+        """
+        # b - same direction
+        # np.rot90(b,2) - same direction
+        # np.fliplr(np.rot90(b)) - flipped direction
+        # np.flipud(np.rot90(b)) - flipped direction
+        if moves is not None:
+            return board, moves
+        return board
+
+
+hex_game_spec = [
     ('board', int32[:, :]),
     ('color', int32),
     ('winner', int32),
 ]
 
 
-@jitclass(game_state_spec)
-class HexGameStateImpl:
+@jitclass(hex_game_spec)
+class HexGameImpl:
     def __init__(self, board_size):
         self.board = np.zeros((board_size, board_size), dtype=np.int32)
         self.color = 1  # 1:X, 2:O
@@ -34,14 +160,16 @@ class HexGameStateImpl:
 
     def result(self):
         """Has game terminated.
-        :returns: 0: game continues, 1: O won, 3: X won
+        :returns: 0: game continues,
+                  1: second player (O) won,
+                  3: first player (X) won
         """
         if self.winner:
             result = 1 if self.winner == 2 else 3
             return result
         return 0
 
-    def move(self, move):
+    def step(self, move):
         tile = move - 1
         assert tile >= 0, 'illegal move'
         assert self.board.flat[tile] == 0, 'illegal move'
@@ -51,74 +179,13 @@ class HexGameStateImpl:
         self.winner = check_win(self.board, tile)
 
 
-class GameState:
-    def __init__(self, startpos=None, board_size=11):
-        assert startpos is None, 'start position not supported'
-        self.impl = HexGameStateImpl(board_size)
-
-    def board(self):
-        return self.impl.board.copy()
-
-    def color(self):
-        """Current player color.
-        :returns: 0=first player (red), 1=second player (blue)
-        """
-        return self.impl.color - 1
-
-    def legal_moves(self):
-        return self.impl.legal_moves()
-
-    def result(self):
-        return self.impl.result()
-
-    def move(self, move):
-        self.impl.move(move)
-
-    @contextmanager
-    def snapshot(self):
-        b = self.impl.board.copy()
-        c = self.impl.color
-        w = self.impl.winner
-        try:
-            yield
-        finally:
-            self.impl.board[:] = b
-            self.impl.color = c
-            self.impl.winner = w
-
-
-def flip_player(board, moves=None):
-    """Flip board to opponent perspective.
-    Change both color and attack direction.
-    """
-    # flip color
-    board = (board > 0) * (3 - board)
-    # flip attack direction
-    board = np.fliplr(np.rot90(board))
-    if moves is not None:
-        m, n = board.shape
-        tiles = moves - 1
-        ii, jj = np.unravel_index(tiles, board.shape)
-        tiles = np.ravel_multi_index((n - 1 - jj, m - 1 - ii), board.shape)
-        moves = tiles.astype(np.int32) + 1
-        return board, moves
-    return board
-
-
-def random_reflect(board, moves=None):
-    """Rotate/flip board at random while keeping same player perspective.
-    """
-    # b - same direction
-    # np.rot90(b,2) - same direction
-    # np.fliplr(np.rot90(b)) - flipped direction
-    # np.flipud(np.rot90(b)) - flipped direction
-    if moves is not None:
-        return board, moves
-    return board
-
-
 @njit('int32[:](int32, UniTuple(int64, 2))')
 def neighbors(tile, size):
+    """Enumerate neighboring tiles on the hex board.
+    :param tile: Center tile
+    :param size: Board size
+    :returns: Array of neighboring tiles
+    """
     ti, tj = divmod(tile, size[1])
     neigs = np.empty(6, dtype=np.int32)
     n = 0
@@ -136,6 +203,11 @@ def neighbors(tile, size):
 
 @njit('int32(int32[:, :], int32)')
 def check_win(board, tile):
+    """Check if move terminated the game.
+    :param board: Game board after move
+    :param tile: Tile of most recent move
+    :returns: Color of winner or 0 if none
+    """
     color = board.flat[tile]
     assert color, 'cannot check empty tile'
     connected = set()
@@ -144,7 +216,10 @@ def check_win(board, tile):
     while border:
         tile = border.pop()
         connected.add(tile)
+        # get Y (color=1) or X (color=2) coordinate of tile
         i = divmod(tile, board.shape[1])[color - 1]
+        # check if connected region reaches both ends of board
+        # vertically (color=1) or horizontally (color=2)
         imin, imax = min(imin, i), max(imax, i)
         if imin == 0 and imax == board.shape[color - 1] - 1:
             return color
@@ -156,76 +231,19 @@ def check_win(board, tile):
     return 0
 
 
-def print_board(board):
-    for i in range(board.shape[0]):
-        if i < 9:
-            txt = ' ' * i
-        elif i == 9:
-            txt = termcolor('  x', fg=Color(red)) + ' ' * 6
-        else:
-            txt = termcolor(' o', fg=Color(blue)) \
-                  + termcolor(r'\\', fg=Color(gray)) + ' ' * 6
-        txt += format_rank(board[i])
-        sys.stdout.write(txt)
-        sys.stdout.write('\n')
-
-
-def print_moves(board, moves, probs):
-    print_board(board)
-
-
-def format_rank(rank):
-    txt = ''
-    for j in range(len(rank)):
-        col = rank[j]
-        pie = '.' if col == 0 else \
-              'X' if col == 1 else \
-              'O'
-        fg = Color(gray if col == 0 else
-                   red if col == 1 else
-                   blue)
-        txt += termcolor(pie, fg=fg)
-        txt += ' '
-    return txt
-
-
-def format_move(board, move):
-    tile = move - 1
-    i, j = np.unravel_index(tile, board.shape)
-    return '{}{}'.format(chr(j + ord('a')), i + 1)
-
-
-class ParseError(BaseException):
-    pass
-
-
-def parse_move(board, moves, move_txt):
-    try:
-        x = move_txt[0]
-        y = int(move_txt[1:])
-    except (IndexError, ValueError):
-        raise ParseError(move_txt)
-    i = y - 1
-    j = ord(x) - ord('a')
-    if not (0 <= i < board.shape[0]
-            and 0 <= j < board.shape[1]):
-        raise ParseError(move_txt)
-    tile = np.ravel_multi_index((i, j), board.shape)
-    return tile + 1
-
-
 if __name__ == '__main__':
-    game = GameState(board_size=11)
+    game = HexGame(board_size=11)
+    game.snapshot()
     for g in range(100):
-        with game.snapshot():
-            for m in range(1000):
-                moves = game.legal_moves()
-                move = np.random.choice(moves)
-                print('Move %d %s: %s' % (
-                    m,
-                    ['x', 'o'][game.color()],
-                    format_move(game.board(), move)))
-                game.move(move)
-                print_board(game.board())
-                if game.result():
-                    break
+        game.restore()
+        for m in range(1000):
+            moves = game.state.legal_moves
+            move = np.random.choice(moves)
+            print('Move %d %s: %s' % (
+                m,
+                ['x', 'o'][game.state.color],
+                game.io.format_move(game.state.board, move)))
+            game.move(move)
+            game.io.print_board(game.state.board)
+            if game.state.result:
+                break

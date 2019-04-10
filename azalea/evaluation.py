@@ -1,66 +1,33 @@
 
 import logging
 from collections import defaultdict
+from typing import Dict, Generator, List, Optional, Tuple
 
 import numpy as np
-import torch
 
-from .game import import_game
-from .policy import Policy
-from .random_policy import RandomPolicy
-from .parallel import ParallelRunner
+from .play_game import play_game
+from .process_pool import ProcessPool
+from .typing import Agent
 
 
-def play_game(config, policies, game_max_length=300):
-    """Play one game between two policies.
-    :returns: +1 first player wins, 0 draw, -1 first player loses
-    """
-    gamelib = import_game(config['game'])
-    game = gamelib.GameState(board_size=config['board_size'])
-    nodes = [p.reset(game) for p in policies]
-    for m in range(game_max_length):
-        action, nodes[0], moves = \
-            play_move(gamelib, game, policies[0], nodes[0], m)
-        if game.result():
-            break
-        nodes[1] = policies[1].make_action(game, nodes[1], action, moves)
-        # switch turns
-        policies = policies[::-1]
-        nodes = nodes[::-1]
-    result = game.result()
-    if not result:
-        logging.warning("game didn't terminate in %d moves", game_max_length)
-        return 0  # draw
-    return result - 2
+Pair = Tuple[int, int]
+OutcomeCounts = List[int]
 
 
-def play_move(utils, game, policy, node, m, print_moves=False):
-    action, node, probs, metrics = policy.choose_action(
-        game, node, m, temperature=1, noise_scale=0)
-    moves = game.legal_moves()
-    if print_moves:
-        print('Move %d (%s): %s %.2f' % (
-            m,
-            ['white', 'black'][m % 2],
-            utils.format_move(game.board(), moves[action]),
-            probs[action]))
-    game.move(moves[action])
-    if print_moves:
-        utils.print_moves(game.board(), moves, probs)
-    return action, node, moves
-
-
-def evaluate(policies, config, num_rounds):
+def evaluate(agents: List[Agent], num_rounds: int,
+             num_workers: Optional[int] = None) \
+        -> Dict[Pair, OutcomeCounts]:
     """Run round robin tournament between policies.
     :param num_rounds: Number of rounds in tournament
     :returns: Dict of outcome triplets
     """
-    outcomes = defaultdict(lambda: [0, 0, 0])
-    pairs = gen_pairs(len(policies))
+    outcomes: Dict[Pair, OutcomeCounts] = defaultdict(lambda: [0, 0, 0])
+    pairs = gen_pairs(len(agents))
     num_games = num_rounds * len(pairs)
     game = 1
+    pool = ProcessPool(num_workers=num_workers)
     for r in range(num_rounds):
-        for pair, res in parallel_compare(pairs, policies, config):
+        for pair, res in parallel_compare(pool, pairs, agents, r):
             outcomes[pair][0] += (res > 0)   # first player wins
             outcomes[pair][1] += (res == 0)  # draws
             outcomes[pair][2] += (res < 0)   # second player wins
@@ -71,7 +38,7 @@ def evaluate(policies, config, num_rounds):
     return outcomes
 
 
-def gen_pairs(num_players):
+def gen_pairs(num_players: int) -> List[Pair]:
     """generate round robin tournament pair ordering"""
     pairs = [(i, j)
              for j in range(num_players)
@@ -79,35 +46,35 @@ def gen_pairs(num_players):
     return pairs
 
 
-def parallel_compare(pairs, policies, config):
-    runner = ParallelRunner(parallel_play,
-                            num_workers=config.get('num_workers'))
-    for seed, pair in enumerate(pairs):
-        state_pair = [policies[pair[0]].state_dict(),
-                      policies[pair[1]].state_dict()]
-        runner.submit(pair, state_pair, config, seed)
-        if runner.full():
-            yield runner.result()
-    while not runner.empty():
-        yield runner.result()
-    runner.close()
+def parallel_compare(pool: ProcessPool,
+                     pairs: List[Pair], agents: List[Agent],
+                     seed: int) \
+        -> Generator[Tuple[Pair, int], None, None]:
+    tasks = (
+        (pair, (agents[pair[0]], agents[pair[1]]), 10000 * seed + s)
+        for s, pair in enumerate(pairs)
+    )
+    for pair, outcome in pool.map_unordered_lowlat(worker, tasks):
+        yield pair, outcome
 
 
-def parallel_play(pair, states, config, seed):
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+def worker(pair: Pair, agents: Tuple[Agent, Agent], seed: int) \
+        -> Tuple[Pair, int]:
+    """Parallel evaluation worker.
+    """
+    # does nothing if logging is already configured
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
 
-    def restore(state):
-        if state:
-            policy = Policy(config)
-            policy.load_state_dict(state)
-        else:
-            policy = RandomPolicy(config)
-        return policy
-
-    policies = [restore(s) for s in states]
     # choose first player by coin flip
-    order = 1 if np.random.random() < .5 else -1
-    outcome = order * play_game(config, policies[::order])
+    rng = np.random.RandomState(seed)
+    order = rng.choice([-1, 1])
+
+    # re-seed agents
+    for a in agents:
+        a.seed(rng.randint(1 << 32))
+
+    result, _, _ = play_game(agents[::order])
+    outcome = order * (result - 2)
     return pair, outcome

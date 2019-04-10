@@ -5,17 +5,21 @@ channels:
 - defaults
 dependencies:
 - python=3.6
-- numba=0.36.*
-- numpy=1.13.*
-- pytorch=0.4.1
-- cudatoolkit>=9.0
-- cudnn>=7.1
-- cuda90>=1.0
-- pyyaml=3.11.*
-- scipy=1.0.*
-- click=6.*
-- mkl
-- tensorflow=1.8.*
-- tensorboard=1.8.*
-- tensorboardX=1.2.*
-- smart_open=1.6.*
+- dataclasses=0.6.*
+- typing_extensions=3.7.*
+- cython=0.29.*
+- numba=0.42.*
+- numpy=1.16.*
+- pandas=0.23.*
+- pytorch=1.0.1
+- cudatoolkit=9.0.*
+#- cudatoolkit=10.0.*
+- pyyaml=3.13.*
+- scipy=1.2.*
+- click=7.*
+- mkl=2019.*
+- tensorboardX=1.6.*
+- smart_open=1.8.*
+- pip:
+  - tensorflow==1.12.*
+  - tensorboard==1.12.*

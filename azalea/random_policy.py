@@ -1,40 +1,49 @@
 
+from typing import Dict, Optional
+
 import numpy as np
 
 
 class RandomPolicy:
-    def __init__(self, config):
+    def __init__(self):
+        self.rng = np.random.RandomState()
+        self.seed()
+
+    def reset(self):
         pass
 
-    def reset(self, game):
+    def seed(self, seed: Optional[int] = None) -> None:
+        self.rng.seed(seed)
+
+    def load_state_dict(self, state: Dict) -> None:
         pass
 
-    def load_state_dict(self, state):
-        pass
-
-    def state_dict(self):
+    def state_dict(self) -> Dict:
         return {}
 
-    def choose_action(self, game, node, depth, **kwargs):
+    def choose_action(self, game, depth, **kwargs):
         """Choose next move at random.
         :param game: Current game state
-        :returns: action - action id,
-                  node - child node following action,
+        :returns: move - chosen move
                   probs - 1d array of action probabilities
         """
-        assert not game.result()
-        moves = game.legal_moves()
-        action = np.random.randint(len(moves))
+        assert not game.state.result
+        moves = game.state.legal_moves
+        action = self.rng.randint(len(moves))
+        move = moves[action]
         probs = np.ones(len(moves), dtype=np.float32) / len(moves)
-        metrics = {}
-        node = None
-        return action, node, probs, metrics
+        info = dict(move_id=action,
+                    moves=moves,
+                    moves_prob=probs,
+                    prob=probs[action],
+                    metrics={})
+        return move, info
 
-    def make_action(self, game, node, action, moves):
+    def execute_action(self, move, moves):
         """Update search tree with opponent action.
         can raise SearchTreeFull
         """
         pass
 
-    def tree_stats(self):
+    def tree_metrics(self):
         return {}

@@ -1,17 +1,25 @@
 
 
 purple, blue, gray, red, green = "#9b59b6", "#3498db", "#95a5a6", "#e74c3c", "#2ecc71"
+darkgray = '#364041'
+darkred = '#891c11'
+darkblue = '#175782'
 white = '#ffffff'
 
 
 class Color:
-    def __init__(self, code=None):
+    def __init__(self, code=None, scale=1.0):
         self.r = self.g = self.b = 0
         if code:
             rgb = int(code[1:], 16)
             self.r = (rgb >> 16) & 0xFF
             self.g = (rgb >> 8) & 0xFF
             self.b = rgb & 0xFF
+        if scale != 1.0:
+            scaled = self.scale(scale)
+            self.r = scaled.r
+            self.g = scaled.g
+            self.b = scaled.b
 
     def scale(self, level, scale_min=0.0):
         level = scale_min + max(0.0, level - scale_min) / (1.0 - scale_min)

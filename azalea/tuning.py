@@ -84,7 +84,7 @@ def update_ranking(policy_checkpoints, config, outcomes):
     """
     # random policy is reference point at 0 elo
     assert policy_checkpoints[0] == '<random>'
-    policies = [RandomPolicy(config)]
+    policies = [RandomPolicy()]
     policies += [Policy.load(config, p)
                  for p in policy_checkpoints[1:]]
     num_battles = 100

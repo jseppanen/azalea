@@ -60,9 +60,14 @@ class Network(nn.Module):
         self.move_bn1 = nn.BatchNorm2d(policy_chans)
         self.relu = nn.ReLU(inplace=True)
 
+    @property
+    def device(self):
+        """Get current device of model."""
+        return self.conv1.weight.device
+
     def forward(self, x):
         """
-        :param x: Batch of game boards (batch x board_size^2, int32)
+        :param x: Batch of game boards (batch x height x width, int32)
         """
         # upsample
         x = self.relu(self.bn1(self.conv1(x)))
@@ -79,22 +84,22 @@ class Network(nn.Module):
         p = p.view(p.size(0), -1)
         return value, p
 
-    def run(self, input, target=None):
+    def run(self, batch, *, compute_loss=False):
         """
         :param input: batch of board and moves (padded)
         """
-        output = self.forward(input['board'], input['moves'])
-        if target:
-            moves_prob = target['moves_prob']
+        output = self.forward(batch['board'], batch['legal_moves'])
+        if compute_loss:
+            moves_prob = batch['moves_prob']
             # Eq. (1) without regularization (done with weight_decay)
-            value_loss = F.mse_loss(output['value'], target['reward'])
+            value_loss = F.mse_loss(output['value'], batch['reward'])
             moves_loss = -(moves_prob * output['moves_logprob']).sum() \
                 / len(moves_prob)
             loss = value_loss.to(moves_loss.device) + moves_loss
-            metrics = {'value_loss': value_loss.item(),
-                       'moves_loss': moves_loss.item()}
             output = dict((k, v.detach()) for k, v in output.items())
-            return output, loss, metrics
+            output.update(value_loss=value_loss.item(),
+                          moves_loss=moves_loss.item())
+            return output, loss
         else:
             output = dict((k, v.detach()) for k, v in output.items())
             return output
@@ -129,20 +134,18 @@ class HexNetwork(Network):
     def forward(self, x, legal_moves):
         """
         legal_moves padded with zeros
-        :param x: Batch of game boards (batch x s^2, int32)
+        :param x: Batch of game boards (batch x height x width, int32)
         :param legal_moves: Batch of legal moves (batch x MAX_MOVES, int32)
         """
         # piece encoder
-        x = self.encoder(x.long())  # batch x s^2 x 4
-        board_size = int(x.size(1) ** .5)
-        x = x.transpose(1, 2).contiguous() \
-             .view(x.size(0), 4, board_size, board_size)
+        x = self.encoder(x.long())  # batch x height x width x 4
+        x = x.permute(0, 3, 1, 2)
         # resnet
         value, p = super().forward(x)
         # policy head
         moves_logit = self.move_fc(p)
         legal_tiles = (legal_moves - 1).clamp(min=0)
-        moves_logit = torch.gather(moves_logit, 1, legal_tiles)
+        moves_logit = torch.gather(moves_logit, 1, legal_tiles.long())
         # clear padding
         moves_logit.masked_fill_(legal_moves == 0, -99)
         moves_logprob = F.log_softmax(moves_logit, dim=1)

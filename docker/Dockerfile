@@ -9,24 +9,25 @@ RUN apt-get update && \
          ca-certificates && \
      rm -rf /var/lib/apt/lists/*
 
-RUN curl -o miniconda.sh -O  https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh && \
-     bash miniconda.sh -b -p /opt/conda && \
-     rm miniconda.sh
+# install base environment
+COPY environment.yml environment.yml
+RUN curl -o miniconda.sh -O  https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+    && bash miniconda.sh -b -p /opt/conda \
+    && /opt/conda/bin/conda update -n base -c defaults conda \
+    && /opt/conda/bin/conda env update -n base -f environment.yml \
+    && /opt/conda/bin/conda clean -ya \
+    && rm miniconda.sh environment.yml
 ENV PATH /opt/conda/bin:$PATH
 
-# install dependencies
-COPY azalea/environment.yml environment.yml
-RUN conda update -n base conda && \
-    conda env update -n base -f environment.yml && \
-    conda clean -ya && \
-    rm environment.yml
-
-COPY azalea /azalea
-ENV PYTHONPATH /azalea
+# install azalea
+ARG PACKAGE
+COPY $PACKAGE .
+RUN pip install --no-cache $PACKAGE \
+    && rm -f $PACKAGE
 
 # needed for click to work under python3
 ENV LC_ALL C.UTF-8
 ENV LANG C.UTF-8
 
+RUN mkdir /work
 WORKDIR /work
-#CMD ["python", "/azalea/train.py"]

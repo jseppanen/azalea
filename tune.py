@@ -46,7 +46,6 @@ if __name__ == '__main__':
     rundir = 'runs/tune-hex11'
     num_experiments = 100
     timeout = 12 * 3600
-    az.redirect_all_output(f'{rundir}/tune.log')
     ranking = az.tuning.random_search(rundir, config, config_variants,
                                       num_experiments, timeout)
     for rank, (score, path) in enumerate(ranking):
