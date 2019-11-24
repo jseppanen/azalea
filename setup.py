@@ -40,7 +40,7 @@ with set_version() as version:
     setup(
         name='azalea',
         version=version,
-        license='GPL-3.0-only',
+        license='Apache-2.0',
         description='Hex board game AI with self-play learning based on the AlphaZero algorithm',
         long_description=long_description,
         long_description_content_type='text/markdown',
@@ -69,7 +69,7 @@ with set_version() as version:
         },
         classifiers=[
             "Programming Language :: Python :: 3",
-            "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+            "License :: OSI Approved :: Apache Software License",
             "Operating System :: POSIX :: Linux",
             "Operating System :: OS Independent",
         ],
