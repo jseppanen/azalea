@@ -1,18 +1,20 @@
 
-from typing import Optional
+from typing import Callable, Dict, Optional
 
 import torch
 
-from .game.hex import HexGame
 from .policy import Policy
 from .random_policy import RandomPolicy
+from .typing import SearchableEnv
 
 
 class AzaleaAgent:
     """Top-level game playing agent/engine interface."""
 
-    def __init__(self, *, path: str = None, policy=None,
-                 device=None, game=HexGame):
+    def __init__(self, game_factory: Callable[[], SearchableEnv], *,
+                 path: str = None,
+                 policy=None,
+                 device=None):
 
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -25,19 +27,15 @@ class AzaleaAgent:
         elif path:
             policy = Policy.load(path, device=device)
 
-        self.game = game()
+        self.game = game_factory()  # own game for each agent
         self.policy = policy
-        self.ply = 0
         self.info = None
-        self.settings = {'exploration_temperature': 0.0}
-
         self.seed()
 
     def reset(self) -> None:
         """Start a new game."""
         self.game.reset()
         self.policy.reset()
-        self.ply = 0
         self.info = None
 
     def seed(self, seed: Optional[int] = None) -> None:
@@ -45,12 +43,17 @@ class AzaleaAgent:
         self.game.seed(seed)
         self.policy.seed(None if seed is None else seed + 1)
 
+    @property
+    def ply(self) -> int:
+        return self.policy.ply
+
+    @property
+    def settings(self) -> Dict:
+        return self.policy.settings
+
     def choose_action(self) -> int:
         """Plan next move."""
-        move, info = self.policy.choose_action(
-            self.game, self.ply,
-            temperature=self.settings['exploration_temperature'],
-            noise_scale=0.)
+        move, info = self.policy.choose_action(self.game)
         self.info = info
         return move
 
@@ -58,5 +61,4 @@ class AzaleaAgent:
         """Execute move."""
         self.policy.execute_action(move, self.game.state.legal_moves)
         self.game.step(move)
-        self.ply += 1
         return self.game.state.result

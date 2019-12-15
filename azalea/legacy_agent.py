@@ -13,7 +13,7 @@ class LegacyAgent:
         config = {'game': 'hex',
                   'device': device}
         self.policy = azalea01.Policy.load(config, path)
-        self.settings = {'exploration_temperature': 0.0}
+        self.settings = {'move_sampling': False}
         self.reset()
 
     def reset(self) -> None:
@@ -32,10 +32,11 @@ class LegacyAgent:
 
     def choose_action(self) -> int:
         """Plan next move."""
+        temperature = 1.0 if self.settings['move_sampling'] else 0.0
         move_id, node, probs, metrics = \
             self.policy.choose_action(
                 self.game, self.node, self.ply,
-                temperature=self.settings['exploration_temperature'],
+                temperature=temperature,
                 noise_scale=0.)
         self.node = node
         self.update_node = False

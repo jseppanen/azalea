@@ -8,6 +8,7 @@ import json
 import click
 
 import azalea as az
+from azalea.game.hex import HexGame
 
 
 @click.command()
@@ -58,18 +59,18 @@ def compare(models, eval_rounds, workers, device, seed):
     agents = []
     for uri in models:
         logging.info(f'loading {uri}')
-        p = az.AzaleaAgent(path=uri, device=device)
+        p = az.AzaleaAgent(HexGame, path=uri, device=device)
         agents.append(p)
 
     # add random policy as reference point at 0 elo
     models = ['<random>'] + models
-    agents = [az.AzaleaAgent()] + agents
+    agents = [az.AzaleaAgent(HexGame)] + agents
 
     for ag in agents:
         ag.seed(seed)
         seed = seed + 1
         # enable stochastic move sampling
-        ag.settings['exploration_temperature'] = 1.0
+        ag.settings['move_sampling'] = True
 
     outcomes = az.evaluate(agents, eval_rounds, num_workers=workers)
     scores = az.ranking.compute_ranking(len(agents), outcomes).tolist()

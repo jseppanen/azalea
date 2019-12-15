@@ -7,6 +7,7 @@ import torch
 import click
 
 import azalea as az
+from azalea.game.hex import HexGame
 
 
 @click.command()
@@ -33,12 +34,12 @@ def compare(model, eval_rounds, workers, device):
     device = torch.device(device)
     agents = [
         az.LegacyAgent(path=model, device=device),
-        az.AzaleaAgent(path=model, device=device)
+        az.AzaleaAgent(HexGame, path=model, device=device)
     ]
 
     for ag in agents:
         # enable stochastic move sampling
-        ag.settings['exploration_temperature'] = 1.0
+        ag.settings['move_sampling'] = True
 
     outcomes = az.evaluate(agents, eval_rounds, num_workers=workers)
     scores = az.ranking.compute_ranking(len(agents), outcomes).tolist()

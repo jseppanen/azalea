@@ -1,32 +1,49 @@
 
 import logging
 from collections import defaultdict
-from typing import Dict, Generator, Optional, Sequence, Tuple
+from typing import Dict, Generator, Sequence, Tuple
 
 from .play_game import play_game
 from .process_pool import ProcessPool
-from .replay_buffer import ReplayData
+from .replay_buffer import ReplayDataFrame
 from .search_tree import SearchTreeFull
 from .typing import Agent
+
+
+Metrics = Dict[str, float]
+GameplayGen = Generator[Tuple[int, ReplayDataFrame, Metrics], None, None]
 
 
 class Player:
     def __init__(self, pool: ProcessPool,
                  agents: Sequence[Agent]):
-        self.gen = parallel_gameplay_gen(pool, agents, collect_data=True)
+        self.agents = agents
+        self.running = True
+        self.gen = pool.map_unordered_lowlat(worker, self._gen_worker_args())
 
-    def read(self, size: int):
+    def read(self, size: int) -> Tuple[ReplayDataFrame, Metrics]:
         """Play self-play games and generate boards.
         :param size: Number of game positions to return
         """
         return batch_examples(self.gen, size)
 
+    def stop(self) -> None:
+        """Clean up processes after self-play."""
+        self.running = False
+        for _ in self.gen:
+            pass
 
-def batch_examples(gameplay_gen, size: int):
+    def _gen_worker_args(self):
+        while self.running:
+            yield (self.agents,)
+
+
+def batch_examples(gameplay_gen: GameplayGen, size: int) \
+        -> Tuple[ReplayDataFrame, Metrics]:
     """Batch replay data to given size.
     """
-    examples = ReplayData()
-    metrics: Dict[str, float] = defaultdict(int)
+    examples = ReplayDataFrame()
+    metrics: Metrics = defaultdict(int)
     while len(examples) < size:
         _, game_data, game_metrics = next(gameplay_gen)
         examples.append(game_data)
@@ -35,21 +52,8 @@ def batch_examples(gameplay_gen, size: int):
     return examples, metrics
 
 
-def parallel_gameplay_gen(pool: ProcessPool, agents: Sequence[Agent], *,
-                          collect_data: bool = False) \
-        -> Generator[Tuple[int, Optional[Dict], Dict], None, None]:
-    """Play games in parallel with process pool.
-    Policies (network) state are copied to worker processes repeatedly.
-    """
-    def gen_args():
-        while True:
-            yield (agents, collect_data)
-
-    for res in pool.map_unordered_lowlat(worker, gen_args()):
-        yield res
-
-
-def worker(agents, collect_data):
+def worker(agents: Sequence[Agent]) \
+        -> Tuple[int, ReplayDataFrame, Metrics]:
     """Parallel game playing worker.
     """
     # does nothing if logging is already configured
@@ -65,8 +69,8 @@ def worker(agents, collect_data):
             pass
 
     try:
-        return play_game(agents, collect_data=collect_data)
+        return play_game(agents, collect_data=True)
     except SearchTreeFull:
         logging.warning('game failed because of SearchTreeFull '
                         '(skipped)')
-        return None, {}, {}
+        return -1, ReplayDataFrame(), {}

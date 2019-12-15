@@ -7,6 +7,7 @@ import numpy as np
 class RandomPolicy:
     def __init__(self):
         self.rng = np.random.RandomState()
+        self.settings = {}
         self.seed()
 
     def reset(self):
@@ -21,7 +22,7 @@ class RandomPolicy:
     def state_dict(self) -> Dict:
         return {}
 
-    def choose_action(self, game, depth, **kwargs):
+    def choose_action(self, game):
         """Choose next move at random.
         :param game: Current game state
         :returns: move - chosen move

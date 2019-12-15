@@ -42,3 +42,4 @@ class GameState(Protocol):
     color: int
     legal_moves: np.ndarray
     result: int
+    board: np.ndarray

@@ -19,8 +19,17 @@ def create_network(network_type, board_size, num_blocks, base_chans):
 
 
 class Policy:
+    """Game playing policy, combination of MCTS and network
+    """
+
     def __init__(self):
         """Construct new policy"""
+        # do greedy & deterministic inference by default
+        self.settings = {
+            'move_sampling': False,
+            'move_exploration': False,
+        }
+
         self.rng = np.random.RandomState()
         self.seed()
 
@@ -68,6 +77,7 @@ class Policy:
         """Start new game
         """
         self.tree = SearchTree()
+        self.ply = 0
 
     def seed(self, seed: Optional[int] = None) -> None:
         self.rng.seed(seed)
@@ -101,6 +111,7 @@ class Policy:
 
     def state_dict(self):
         """Return model state
+        Only serializes the (hyper)parameters, not ongoing game state (search tree etc)
         """
         return {
             'net': self.net.state_dict(),
@@ -118,9 +129,7 @@ class Policy:
             'rng': self.rng.__getstate__(),
         }
 
-    def choose_action(self, game: SearchableEnv, depth: int,
-                      temperature: Optional[float] = None,
-                      noise_scale: Optional[float] = None) \
+    def choose_action(self, game: SearchableEnv) \
             -> Tuple[int, Dict[str, Any]]:
         """Choose next move.
         can raise SearchTreeFull
@@ -129,11 +138,14 @@ class Policy:
                   info - auxiliary information
         """
         assert not game.state.result
-        if temperature is None:
+
+        temperature = 0.0
+        noise_scale = 0.0
+        if self.settings['move_sampling']:
             temperature = self.exploration_temperature
-        if noise_scale is None:
-            noise_scale = self.exploration_noise_scale
-        if depth >= self.exploration_depth:
+            if self.settings['move_exploration']:
+                noise_scale = self.exploration_noise_scale
+        if self.ply >= self.exploration_depth:
             temperature = 0.
 
         probs, value, metrics = self.tree.search(
@@ -161,6 +173,7 @@ class Policy:
         """
         move_id = legal_moves.tolist().index(move)
         self.tree.move(move_id)
+        self.ply += 1
 
     def tree_metrics(self):
         return self.tree.metrics()

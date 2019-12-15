@@ -125,7 +125,7 @@ def score_actions(stats: SearchStats,
     prior = stats.prior_prob  # P(s, a)
     if noise_scale:
         # explore random actions at root node
-        noise = rng.dirichlet(noise_alpha, len(prior))
+        noise = rng.dirichlet(np.full(len(prior), noise_alpha))
         prior = (
             (1.0 - noise_scale) * prior + noise_scale * noise
         ).astype(np.float32)
@@ -165,7 +165,7 @@ def evaluate_batch(game: SearchableEnv,
         num_children - number of moves (nodes) for each position,
         prior_prob - move priors for each position
     """
-    batch = prep.batch(states)
+    batch = prep.batch_games(states)
 
     # FIXME necessary?
     batch['board'] = batch['board'].copy()

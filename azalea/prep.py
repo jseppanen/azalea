@@ -5,11 +5,14 @@ from typing import Any, Dict, Optional, Sequence, Union, overload
 import numpy as np
 import torch
 
-Dataclass = Any
+from .replay_buffer import ReplayRecord
+from .typing import GameState
+
+
 ScalarOrArray = Union[float, np.ndarray]
 
 
-def batch(seq: Sequence[Dataclass]) -> Dict[str, np.ndarray]:
+def batch_games(seq: Sequence[GameState]) -> Dict[str, np.ndarray]:
     """Batch sequence of dataclass objects into arrays
     :param states: Sequence of dataclasses with scalar or array members
     :returns: Dict of arrays
@@ -18,13 +21,25 @@ def batch(seq: Sequence[Dataclass]) -> Dict[str, np.ndarray]:
     return {name: pad(df[name]) for name in df}
 
 
-def torch_batch(seq: Sequence[Dataclass]) -> Dict[str, torch.Tensor]:
-    nb = batch(seq)
+def batch_replays(seq: Sequence[ReplayRecord]) -> Dict[str, np.ndarray]:
+    """Batch sequence of dataclass objects into arrays
+    :param states: Sequence of dataclasses with scalar or array members
+    :returns: Dict of arrays
+    """
+    # flatten nested state
+    df = transpose_dataclass([rec.state for rec in seq])
+    df.update(transpose_dataclass(seq))
+    del df['state']
+    return {name: pad(df[name]) for name in df}
+
+
+def torch_batch_replays(seq: Sequence[ReplayRecord]) -> Dict[str, torch.Tensor]:
+    nb = batch_replays(seq)
     tb = {k: torch.from_numpy(nb[k]) for k in nb}
     return tb
 
 
-def transpose_dataclass(seq: Sequence[Dataclass]) \
+def transpose_dataclass(seq: Sequence) \
         -> Dict[str, Sequence[ScalarOrArray]]:
     """Transpose sequence of dataclass objects
     :param states: Sequence of dataclasses with scalar or array members

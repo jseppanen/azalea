@@ -5,6 +5,7 @@ from typing import List
 
 import click
 import azalea as az
+from azalea.game.hex import HexGame
 
 
 def play_game_interactive(agents: List[az.typing.Agent], *,
@@ -36,7 +37,7 @@ def main(model, first):
                         format='%(asctime)s %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S')
 
-    computer = az.AzaleaAgent(path=model)
+    computer = az.AzaleaAgent(HexGame, path=model)
     human = az.HumanAgent()
     if first:
         agents = [human, computer]
